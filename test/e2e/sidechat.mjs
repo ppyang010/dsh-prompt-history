@@ -64,9 +64,9 @@ export async function sideChatSuite(page, check, browser) {
   await seedComposerMessage(page, '侧聊校验用的一条固定提示词')
   await waitForIdle(page)
 
-  // 1) Default-on: a fresh profile keeps the switch on, so the toolbar offers it.
+  // 兼容模式夹具显式启用旧侧聊；新用户默认关闭由组件测试覆盖。
   const withFeature = await toolbarButtons(page)
-  check('side chat is on by default (toolbar offers 侧聊追问)',
+  check('legacy side chat is explicitly enabled (toolbar offers 侧聊追问)',
     withFeature.includes('复制') && withFeature.includes('引用') && withFeature.some((label) => /侧聊/.test(label)),
     { labels: withFeature })
 

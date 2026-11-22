@@ -1,0 +1,288 @@
+/*
+上游 acb3e67 的真实打开函数和接口补丁锚点。
+MIT License
+
+Copyright (c) 2026 KarlOfLaw
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+*/
+async function openSide(parentId, anchorText = '') {
+  if (!uiState.enabled || uiState.busy) return
+  if (!usesBetterSidebar()) closeBetterSidebarPanel()
+  if (uiState.sides.has(parentId)) {
+    const side = uiState.sides.get(parentId)
+    const selections = appendSelection(side?.selections, anchorText)
+    patchSide(parentId, { hidden: false, selections })
+    persistSelections(side.sideId, selections)
+    update({ error: '', errorParentId: null })
+    openBetterSidebarTab(parentId)
+    return
+  }
+  update({ busy: true, error: '', errorParentId: null })
+  try {
+    const result = await rpc('sideChat.open', { parentSessionId: parentId, anchorText, preset: uiState.preset })
+    const selections = appendSelection(storedSelections(result.sessionId), anchorText)
+    setSide(parentId, { sideId: result.sessionId, hidden: false, selections })
+    persistSelections(result.sessionId, selections)
+    update({ dialog: null, busy: false })
+    openBetterSidebarTab(parentId)
+  } catch (error) {
+    update({ busy: false, error: error instanceof Error ? error.message : String(error), errorParentId: parentId })
+  }
+}
+
+function ParallelConversation(props) {
+  const state = useSideState()
+  const sideState = state.sides.get(props.sessionId)
+  const ownsSide = state.enabled && sideState !== undefined
+  const integrated = usesBetterSidebar(state)
+  const sideVisible = ownsSide && sideState.hidden !== true && !integrated
+  const sideId = sideState?.sideId ?? null
+  const splitRef = React.useRef(null)
+  const mainRef = React.useRef(null)
+  const [selection, setSelection] = React.useState(null)
+  const [sideBinding, setSideBinding] = React.useState(undefined)
+  const betterSidebarOpen = useBetterSidebarPanelOpen(sideVisible)
+  useBetterSidebarAutoHide(sideVisible, props.sessionId)
+  const SessionProvider = props.SessionProvider
+  const factoryMode = typeof props.renderFactorySlot === 'function'
+  if (factoryMode) conversationKits.set(props.sessionId, {
+    renderFactorySlot: props.renderFactorySlot,
+    SessionProvider: props.SessionProvider,
+  })
+
+  React.useEffect(() => () => { conversationKits.delete(props.sessionId) }, [props.sessionId])
+
+  React.useLayoutEffect(() => {
+    const root = splitRef.current
+    if (!sideVisible || root === null) return undefined
+    const headers = [root.querySelector('.dsh-sc-column-main header'), root.querySelector('.dsh-sc-column-side header')]
+    if (headers.some(header => header === null)) return undefined
+    const originals = headers.map(header => header.style.minHeight)
+    let frame
+    let applied
+    const measure = () => {
+      headers.forEach((header, index) => { header.style.minHeight = originals[index] })
+      const height = Math.max(...headers.map(header => header.getBoundingClientRect().height))
+      applied = `${height}px`
+      headers.forEach(header => { header.style.minHeight = applied })
+      root.setAttribute('data-side-chat-align-headers', '')
+    }
+    const schedule = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(measure)
+    }
+    const observer = new ResizeObserver(schedule)
+    headers.forEach(header => observer.observe(header))
+    observer.observe(root)
+    measure()
+    return () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+      root.removeAttribute('data-side-chat-align-headers')
+      headers.forEach((header, index) => {
+        if (header.style.minHeight === applied) header.style.minHeight = originals[index]
+      })
+    }
+  }, [sideVisible, sideBinding?.kind, sideId])
+
+  React.useEffect(() => {
+    if (integrated && ownsSide) openBetterSidebarTab(props.sessionId)
+  }, [integrated, ownsSide, props.sessionId])
+
+  React.useEffect(() => {
+    if (!state.enabled || !ownsSide) {
+      setSideBinding(undefined)
+      return undefined
+    }
+    let cancelled = false
+    if (factoryMode) {
+      let reference
+      let ready
+      try {
+        reference = sessionsService?.retain?.(sideId, { source: 'sideChat' })
+        ready = reference?.ready
+      } catch (error) {
+        try {
+          reference = sessionsService?.retainAgentScope?.(sideId)
+          ready = reference?.binding?.session?.open?.()
+        } catch (fallbackError) {
+          const failure = fallbackError ?? error
+          update({ error: failure instanceof Error ? failure.message : String(failure), errorParentId: props.sessionId })
+        }
+      }
+      if (reference === undefined) {
+        update({ error: 'DSH 0.2 无法保留侧聊会话', errorParentId: props.sessionId })
+        return undefined
+      }
+      setSideBinding({ kind: 'factory', sideId, reference })
+      Promise.resolve(ready).catch(error => {
+        if (!cancelled) update({ error: error instanceof Error ? error.message : String(error), errorParentId: props.sessionId })
+      })
+      return () => {
+        cancelled = true
+        reference.release?.()
+      }
+    }
+    let attempts = 0
+    const connect = () => {
+      if (cancelled) return
+      const info = sessionsService?.provideInfo?.(sideId)
+      const session = sessionsService?.binding?.(sideId)?.session
+      if (info !== undefined && typeof session?.open === 'function') {
+        void session.open().then(() => {
+          if (!cancelled) setSideBinding({ kind: 'legacy', sideId, providedInfo: info })
+        }).catch(error => {
+          if (!cancelled) update({ error: error instanceof Error ? error.message : String(error), errorParentId: props.sessionId })
+        })
+        return
+      }
+      attempts += 1
+      if (attempts < 40) setTimeout(connect, 100)
+      else update({ error: '无法打开侧聊的原生会话窗口', errorParentId: props.sessionId })
+    }
+    connect()
+    return () => { cancelled = true }
+  }, [state.enabled, ownsSide, sideId, props.sessionId, factoryMode])
+
+  React.useEffect(() => {
+    setSelection(null)
+    if (state.dialog !== null && state.dialog.parentId !== props.sessionId) update({ dialog: null })
+  }, [props.sessionId, state.dialog?.parentId])
+
+  React.useLayoutEffect(() => {
+    if (sideVisible && betterSidebarOpen) closeBetterSidebarPanel()
+  }, [sideVisible, betterSidebarOpen])
+
+  React.useEffect(() => {
+    if (!state.enabled) {
+      setSelection(null)
+      return undefined
+    }
+    const root = mainRef.current
+    if (root === null) return undefined
+    const onMouseUp = event => {
+      const target = event.target
+      if (!(target instanceof Node) || !root.contains(target)) return
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.closest?.('[contenteditable="true"]')) return
+      const selected = window.getSelection()
+      const text = selected?.toString().trim() ?? ''
+      if (text.length < 2 || selected.rangeCount === 0) {
+        setSelection(null)
+        return
+      }
+      const range = selected.getRangeAt(0)
+      if (!root.contains(range.commonAncestorContainer)) return
+      const rect = range.getBoundingClientRect()
+      setSelection({
+        text: text.slice(0, 8000),
+        rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height },
+      })
+    }
+    root.addEventListener('mouseup', onMouseUp)
+    return () => root.removeEventListener('mouseup', onMouseUp)
+  }, [state.enabled, props.sessionId])
+
+  const dismissSelection = React.useCallback(() => setSelection(null), [])
+  const selectionButton = selection === null ? null : h(SelectionActions, {
+    selection,
+    onDismiss: dismissSelection,
+    onApply: () => {
+      const text = selection.text
+      setSelection(null)
+      window.getSelection()?.removeAllRanges()
+      void openSide(props.sessionId, text)
+    },
+  })
+
+  const main = h('section', { ref: mainRef, className: 'dsh-sc-column dsh-sc-column-main', 'data-side-chat-main': '' },
+    h(NativeConversationRoot, props),
+  )
+  const resize = event => {
+    const root = splitRef.current
+    if (root === null) return
+    event.preventDefault()
+    const rect = root.getBoundingClientRect()
+    const move = moveEvent => {
+      const ratio = Math.min(70, Math.max(25, ((rect.right - moveEvent.clientX) / rect.width) * 100))
+      update({ sideRatio: Math.round(ratio * 10) / 10 })
+    }
+    const stop = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', stop)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', stop)
+  }
+  const resizeKey = event => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    event.preventDefault()
+    const delta = event.shiftKey ? 5 : 2
+    update({ sideRatio: Math.min(70, Math.max(25, state.sideRatio + (event.key === 'ArrowLeft' ? delta : -delta))) })
+  }
+  const divider = sideVisible
+    ? h('div', {
+      className: 'dsh-sc-resizer',
+      role: 'separator',
+      tabIndex: 0,
+      'aria-label': '调整主对话与侧聊宽度',
+      'aria-orientation': 'vertical',
+      'aria-valuemin': 25,
+      'aria-valuemax': 70,
+      'aria-valuenow': Math.round(state.sideRatio),
+      onPointerDown: resize,
+      onKeyDown: resizeKey,
+    })
+    : null
+  let side = null
+  if (sideVisible) {
+    const current = sideBinding?.sideId === sideId ? sideBinding : undefined
+    side = factoryMode
+      ? h(FactorySidePane, {
+        reference: current?.kind === 'factory' ? current.reference : undefined,
+        renderFactorySlot: props.renderFactorySlot,
+        renderSlot: props.renderSlot,
+        SessionProvider,
+        sideId,
+      })
+      : h(LegacySidePane, {
+        providedInfo: current?.kind === 'legacy' ? current.providedInfo : undefined,
+        kit: props,
+        SessionProvider,
+        sideId,
+      })
+  }
+  if (!state.enabled) return h(NativeConversationRoot, props)
+  return h(React.Fragment, null,
+    h('div', {
+      ref: splitRef,
+      className: `dsh-sc-root ${sideVisible ? 'dsh-sc-root-split' : 'dsh-sc-root-single'}`,
+      'data-side-chat-layout': sideVisible ? 'split' : 'single',
+      style: { '--dsh-sc-side-width': `${state.sideRatio}%` },
+    }, main, divider, side),
+    selectionButton,
+    state.error === '' || state.errorParentId !== props.sessionId ? null : h('div', { className: 'dsh-sc-error' }, state.error),
+    ownsSide ? h(CloseDialog, { parentId: props.sessionId, sideId }) : null,
+  )
+}
+
+function install(ctx) {
+    styles.insert(CSS)
+}

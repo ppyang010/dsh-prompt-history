@@ -1,6 +1,6 @@
 {
   "name": "dsh-prompt-history",
-  "version": "1.13.0",
+  "version": "1.13.0-local.session-history.6",
   "description": "DSH web plugin for the composer: shell-style prompt history (Up/Down with prefix search, Ctrl+R reverse search), Codex-style completion ghosted after the caret — history first, then a model continuation of the half-written message — plus next-prompt prediction in the empty input (Tab or → to accept), a selection toolbar (copy / quote / ask in side chat), right-click paste, a saved prompt-template panel, a draggable chat TOC, and a side chat that runs a parallel agent thread in the right sidebar — forked with the full conversation, dockable/splittable/floatable, with bidirectional bridging to the main chat and a parallel-write guard. Fully internationalized (zh/en), no configuration required.",
   "keywords": [
     "autocomplete",
@@ -93,10 +93,11 @@
     "@deepseek-ai/dsh-session": "0.2.0-rc.2",
     "@deepseek-ai/dsh-typert-protocol": "0.2.0-rc.2",
     "@types/react": "~18.3.1",
-    "@types/react-dom": "^19.2.5",
+    "@types/react-dom": "^18.3.0",
+    "jsdom": "^31.0.0",
     "puppeteer-core": "^24.10.0",
     "react": "^18.2.0",
-    "react-dom": "^19.2.8",
+    "react-dom": "^18.2.0",
     "tsdown": "^0.22.2",
     "typescript": "^5.6.0",
     "unrun": "^0.3.1"
@@ -107,6 +108,7 @@
     "prepare": "pnpm build",
     "test": "pnpm run typecheck && pnpm run test:e2e",
     "test:e2e": "node test/e2e/run.mjs",
+    "test:unit": "node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "watch": "tsdown --watch"
   }

@@ -6,6 +6,8 @@
  * both see the same authoritative value.
  */
 
+import { clampSessionCap, SESSION_CAP_DEFAULT } from './historyRing.ts'
+
 /** Copy behavior on text selection. */
 export type CopyMode = 'toolbar' | 'auto'
 
@@ -18,10 +20,19 @@ export interface PluginPrefs {
    * floods clipboard history).
    */
   copyMode: CopyMode
+  /** 使用原生选文菜单；旧宿主可手动关闭以恢复全局工具栏。 */
+  nativeSelection: boolean
+  /** 通过独立 Side Chat 客户端接口提供打开按钮；保留旧存储键以沿用用户设置。 */
+  sideChatDomCompat: boolean
   /** Right-click on the composer textarea pastes the clipboard directly. */
   rightClickPaste: boolean
   /** Keep one global prompt-history ring across sessions (localStorage). */
   globalHistory: boolean
+  /**
+   * Max user prompts kept per session in localStorage (oldest dropped).
+   * Used by ↑/↓ when cross-session history is off.
+   */
+  sessionHistoryCap: number
   /**
    * Codex-style prompt completion: while the draft is a prefix of an earlier
    * prompt, ghost the rest after the caret and accept it with Tab / →.
@@ -79,11 +90,14 @@ export interface PluginPrefs {
 
 const STORAGE_KEY = 'dsh-prompt-history.prefs'
 /** Stored shape version; bump when the migration rules change. */
-const STORE_VERSION = 4
+const STORE_VERSION = 5
 const DEFAULTS: PluginPrefs = {
   copyMode: 'toolbar',
+  nativeSelection: true,
+  sideChatDomCompat: true,
   rightClickPaste: true,
   globalHistory: false,
+  sessionHistoryCap: SESSION_CAP_DEFAULT,
   promptCompletion: true,
   aiCompletion: true,
   promptEnhance: true,
@@ -91,7 +105,7 @@ const DEFAULTS: PluginPrefs = {
   quoteYield: true,
   contextSuggest: true,
   promptTemplates: true,
-  sideChat: true,
+  sideChat: false,
   writeGuard: true,
 }
 
@@ -146,8 +160,11 @@ function migrate(parsed: unknown): PluginPrefs {
         : DEFAULTS.copyMode
   return {
     copyMode,
+    nativeSelection: bool(source.nativeSelection, DEFAULTS.nativeSelection),
+    sideChatDomCompat: bool(source.sideChatDomCompat, DEFAULTS.sideChatDomCompat),
     rightClickPaste: bool(source.rightClickPaste, DEFAULTS.rightClickPaste),
     globalHistory: bool(source.globalHistory, DEFAULTS.globalHistory),
+    sessionHistoryCap: clampSessionCap(source.sessionHistoryCap, DEFAULTS.sessionHistoryCap),
     promptCompletion: bool(source.promptCompletion, DEFAULTS.promptCompletion),
     aiCompletion: bool(source.aiCompletion, DEFAULTS.aiCompletion),
     promptEnhance: bool(source.promptEnhance, DEFAULTS.promptEnhance),
@@ -188,7 +205,8 @@ export function getPrefs(): PluginPrefs {
 
 /** Apply one setting and persist it. */
 export function setPref<K extends keyof PluginPrefs>(key: K, value: PluginPrefs[K]): void {
-  prefs = { ...prefs, [key]: value }
+  const next = key === 'sessionHistoryCap' ? clampSessionCap(value, DEFAULTS.sessionHistoryCap) as PluginPrefs[K] : value
+  prefs = { ...prefs, [key]: next }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: STORE_VERSION, data: prefs }))
   } catch {

@@ -1,0 +1,404 @@
+diff --git a/src/client/annotate/SelectionToolbar.tsx b/src/client/annotate/SelectionToolbar.tsx
+--- a/src/client/annotate/SelectionToolbar.tsx
++++ b/src/client/annotate/SelectionToolbar.tsx
+@@ -1,4 +1,4 @@
+-import { useState } from 'react'
++import { useState, type ReactNode } from 'react'
+ import { SelectionToolbarFrame } from '../annotations/SelectionToolbarFrame.tsx'
+ import { useLocaleTick } from '../locale-tick.ts'
+ import { t } from '../locales.ts'
+@@ -9,6 +9,7 @@
+ /** Preserve Sidenote's selection surface while admitting the host quote action. */
+ export function SelectionToolbar(props: {
+   snapshot: SelectionSnapshot
++  externalMenu?: ReactNode
+   sideChatAvailable: boolean
+   addAvailable: boolean
+   onAdd(): void
+@@ -20,6 +21,7 @@
+   if (!props.snapshot.source.body.isConnected || props.snapshot.range.getClientRects().length === 0) return null
+   return (
+     <SelectionToolbarFrame range={props.snapshot.range} view={props.snapshot.source.view} clip={() => sourceClip(props.snapshot.source)}>
++      {props.externalMenu ?? <>
+       {props.onQuote && <button type="button" className={css.toolbarButton} title={t('nativeQuoteHint')}
+         onMouseDown={event => { event.preventDefault() }}
+         onClick={event => { event.preventDefault(); event.stopPropagation(); setFailed(!props.onQuote!()) }}>
+@@ -38,6 +40,7 @@
+       </button>}
+       {!props.addAvailable && <span className={css.toolbarStatus} role="status">{t('quoteWorkflowWaiting')}</span>}
+       {failed && <span className={css.toolbarStatus} role="alert">{t('nativeQuoteFailed')}</span>}
++      </>}
+     </SelectionToolbarFrame>
+   )
+ }
+diff --git a/src/client/annotate/overlay.tsx b/src/client/annotate/overlay.tsx
+--- a/src/client/annotate/overlay.tsx
++++ b/src/client/annotate/overlay.tsx
+@@ -27,7 +27,7 @@
+ import { quoteSourceOf, sourceClip, focusSourceComposer } from '../annotations/source.ts'
+ import { FirstUseHint } from './hint.tsx'
+ import type { Annotation, AnnotationStore } from '../annotations/model.ts'
+-import type { SelectionController, SelectionSnapshot } from './selection.ts'
++import { captureSelection, type SelectionController, type SelectionSnapshot } from './selection.ts'
+ import { AnnotationBoundary } from '../annotations/boundary.tsx'
+ import type { SidenotePreferences } from '../preferences.ts'
+ import { SelectionToolbar } from './SelectionToolbar.tsx'
+@@ -189,16 +189,29 @@
+     window.getSelection()?.removeAllRanges()
+   }
+ 
+-  const askInSideChat = (snapshot: SelectionSnapshot): void => {
+-    // 按偏好收集注解，等选定的实际目标就绪后递交共享对象。
++  const askInSideChat = useCallback((snapshot: SelectionSnapshot, direct = false): void => {
++    // 按偏好收集注解；外部「引用到侧聊」直接进入待发批注，不发送。
+     const anchor = selectionBadgePoint(snapshot)
+     const target = sideChatBridge.current?.captureTarget(snapshot.sessionId)
+     const targetTitle = target?.title
+-    setSideDraft({ snapshot, x: anchor.x, y: anchor.y, abort: new AbortController(), target, skipNote: !preference.showSideChatNote,
++    setSideDraft({ snapshot, x: anchor.x, y: anchor.y, abort: new AbortController(), target, skipNote: direct || !preference.showSideChatNote,
+       ...(targetTitle !== undefined ? { targetTitle } : {}) })
+     controller.clear()
+-    window.getSelection()?.removeAllRanges()
+-  }
++    if (!direct) window.getSelection()?.removeAllRanges()
++  }, [controller, preference.showSideChatNote])
++
++  useEffect(() => {
++    const bridgeWindow = window as Window & { __dshSidenoteQuoteSelection?: (sessionId: string) => boolean }
++    const quote = (sessionId: string): boolean => {
++      if (sideDraft !== null || sideChatBridge.current === null || currentSessionIdOf(ctx) !== sessionId) return false
++      const snapshot = captureSelection(sessionId)
++      if (snapshot?.sessionId !== sessionId || snapshot.source.surface !== 'main') return false
++      askInSideChat(snapshot, true)
++      return true
++    }
++    bridgeWindow.__dshSidenoteQuoteSelection = quote
++    return () => { if (bridgeWindow.__dshSidenoteQuoteSelection === quote) delete bridgeWindow.__dshSidenoteQuoteSelection }
++  }, [askInSideChat, ctx, sideDraft])
+ 
+   const commitSideDraft = async (note: string): Promise<boolean> => {
+     if (sideDraft === null) return false
+@@ -240,6 +253,21 @@
+   const editingAnnotation = editor === null ? undefined : store.get(editor.annotationId)
+   const viewingAnnotation = viewer === null ? undefined : store.get(viewer.annotationId)
+ 
++  const externalMenu = selection !== null && selection.source.surface === 'main'
++    ? (window as Window & { __dshPromptHistorySelectionMenu?: (props: { sessionId: string; readText(): string | null; clearSelection(): void; dismiss(): void; quoteSelection(): boolean }) => ReactNode }).__dshPromptHistorySelectionMenu?.({
++      sessionId: selection.sessionId,
++      readText: () => {
++        const current = captureSelection(currentSessionIdOf(ctx))
++        return current?.sessionId === selection.sessionId && current.text === selection.text && current.anchorKey === selection.anchorKey && current.occurrence === selection.occurrence ? current.text : null
++      },
++      clearSelection: () => window.getSelection()?.removeAllRanges(),
++      dismiss: () => controller.clear(),
++      quoteSelection: () => {
++        if (sideDraft !== null || sideChatBridge.current === null || currentSessionIdOf(ctx) !== selection.sessionId) return false
++        askInSideChat(selection, true)
++        return true
++      },
++    }) : null
+   return (
+     <>
+       <FirstUseHint />
+@@ -247,6 +275,7 @@
+         <SelectionToolbar
+           key={`${selection.sessionId}:${selection.anchorKey}:${selection.anchorText}:${selection.occurrence}`}
+           snapshot={selection}
++          externalMenu={externalMenu}
+           onQuote={nativeQuoteAvailable ? () => {
+             if (!insertNativeQuote(ctx, selection.sessionId, selection.text)) return false
+             controller.clear()
+diff --git a/src/client/annotations/NativeComposer.tsx b/src/client/annotations/NativeComposer.tsx
+--- a/src/client/annotations/NativeComposer.tsx
++++ b/src/client/annotations/NativeComposer.tsx
+@@ -7,6 +7,7 @@
+ import type { ReflowStore } from '../reflow.ts'
+ import { submissionExtrasOf } from './submissionExtras.ts'
+ import { submitControlledInput } from './send.ts'
++import { externalQuotes, subscribeExternalQuotes } from './externalQuotes.ts'
+ import { t } from '../locales.ts'
+ import css from './annotations.module.css'
+ 
+@@ -29,7 +30,7 @@
+ /** The host has already resolved Enter/click, menus, IME and busy delivery mode. */
+ export function submitNativeWithContext(ctx: Context, annotations: AnnotationStore, reflow: ReflowStore, sessionId: string, native: Submit, mode?: 'queue' | 'steer', source?: 'click' | 'enter'): void {
+   if (annotations.getSubmission(sessionId).pending) return
+-  const hasContext = annotations.countActive(sessionId) > 0 || reflow.list(sessionId).length > 0
++  const hasContext = annotations.countActive(sessionId) > 0 || reflow.list(sessionId).length > 0 || externalQuotes()?.has(sessionId) === true
+   const input = resolveInput(ctx, sessionId)
+   if (!input) {
+     if (hasContext || submissionExtrasOf(sessionId)?.needsFirstSend()) annotations.setSubmission(sessionId, { pending: false, error: t('inputUnavailable') })
+@@ -52,7 +53,8 @@
+   const busyMode = props.useBusyEnter(mode => mode)
+   const sessionId = props.sessionId ?? ''
+   const pending = annotations.getSubmission(sessionId).pending
+-  const hasContext = annotations.countActive(sessionId) > 0 || reflow.list(sessionId).length > 0
++  const hasExternalQuotes = useSyncExternalStore(subscribeExternalQuotes, () => externalQuotes()?.has(sessionId) === true)
++  const hasContext = annotations.countActive(sessionId) > 0 || reflow.list(sessionId).length > 0 || hasExternalQuotes
+   const contextOnly = hasContext && input?.draft.trim() === '' && (input.attachmentIds ?? input.imageIds ?? []).length === 0
+   const root = useRef<HTMLDivElement>(null)
+   const [seat] = useState(() => document.createElement('span'))
+@@ -82,7 +84,7 @@
+   const disabled = pending || input?.phase !== 'plain' || props.disabled || props.blocked !== undefined || session?.removed || offline || !keyboard || !props.inputActions
+   const mode = session?.running ? busyMode : undefined
+   const label = props.t(session?.running ? mode === 'steer' ? 'input.send.steer' : 'input.send.queue' : 'input.send')
+-  return <div className={css.userContextHost} ref={root}>
++  return <div className={css.userContextHost} ref={root} data-dsh-sidenote-handles-ph-quotes={hasExternalQuotes && keyboard && props.inputActions ? '' : undefined}>
+     {createElement(Original, { ...props, keyboard, useInput })}
+     {contextOnly && nativeButton && createPortal(<button type="button" data-sidenote-submit className={nativeButton.className} disabled={disabled} aria-label={label} title={label} onClick={() => { keyboard?.submit(mode, 'click') }}>
+       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6" /></svg>
+diff --git a/src/client/annotations/externalQuotes.ts b/src/client/annotations/externalQuotes.ts
+new file mode 100644
+--- /dev/null
++++ b/src/client/annotations/externalQuotes.ts
+@@ -0,0 +1,15 @@
++interface PromptHistoryQuotes {
++  has(sessionId: string): boolean
++  capture(sessionId: string): { text: string; accept(): void } | null
++}
++
++/** 无提示词历史插件时自然退化，不改变原生提交行为。 */
++export function externalQuotes(): PromptHistoryQuotes | undefined {
++  if (typeof window === 'undefined') return undefined
++  return (window as Window & { __dshPromptHistoryQuotes?: PromptHistoryQuotes }).__dshPromptHistoryQuotes
++}
++
++export function subscribeExternalQuotes(notify: () => void): () => void {
++  window.addEventListener('dsh-ph-pending-quotes', notify)
++  return () => window.removeEventListener('dsh-ph-pending-quotes', notify)
++}
+diff --git a/src/client/annotations/send.ts b/src/client/annotations/send.ts
+--- a/src/client/annotations/send.ts
++++ b/src/client/annotations/send.ts
+@@ -8,6 +8,7 @@
+ import type { ReflowItem, ReflowStore } from '../reflow.ts'
+ import { submissionExtrasOf } from './submissionExtras.ts'
+ import { t } from '../locales.ts'
++import { externalQuotes } from './externalQuotes.ts'
+ 
+ /** Main and side composers use this same native transaction and acceptance boundary. */
+ export async function submitAnnotations(options: {
+@@ -85,7 +86,8 @@
+   if (draft.phase !== 'plain' || draft.draft.trimStart().startsWith('/')) return false
+   const active = store.listActive(sessionId)
+   const reflows = reflow.list(sessionId)
+-  if (draft.draft.trim() === '' && inputAttachmentIds(input).length === 0 && active.length === 0 && reflows.length === 0) return false
++  const quotes = externalQuotes()?.capture(sessionId)
++  if (draft.draft.trim() === '' && inputAttachmentIds(input).length === 0 && active.length === 0 && reflows.length === 0 && !quotes) return false
+   const extras = submissionExtrasOf(sessionId)
+   store.setSubmission(sessionId, { pending: true })
+   try {
+@@ -95,8 +97,10 @@
+     // Context and body must share one host admission and delivery window.
+     // An independent inject can run before a queued message or be repeated
+     // when its acknowledgement arrives after the client timeout.
+-    const accepted = await submitAnnotations({ ctx, store, sessionId, input, annotations: active, reflows, leadingBlocks: prefix ? [prefix.text] : [], contextImages: prefix?.images, mode })
++    const leadingBlocks = [...(quotes ? [quotes.text] : []), ...(prefix ? [prefix.text] : [])]
++    const accepted = await submitAnnotations({ ctx, store, sessionId, input, annotations: active, reflows, leadingBlocks, contextImages: prefix?.images, mode })
+     if (accepted) {
++      quotes?.accept()
+       for (const item of reflows) reflow.remove(item.id)
+       extras?.onSubmitText(draft.draft)
+       extras?.onAccepted()
+diff --git a/src/client/host/contracts.ts b/src/client/host/contracts.ts
+--- a/src/client/host/contracts.ts
++++ b/src/client/host/contracts.ts
+@@ -392,6 +392,7 @@
+ export type KnownSlotKey =
+   | 'sidebar.workspaces'
+   | 'conversation.input.dock'
++  | 'conversation.session.header.actions'
+   | 'conversation.session.header.utilities'
+   | 'settings.general.item'
+   | 'settings.section'
+diff --git a/src/client/host/selection.tsx b/src/client/host/selection.tsx
+--- a/src/client/host/selection.tsx
++++ b/src/client/host/selection.tsx
+@@ -8,7 +8,7 @@
+ 
+ /** Coordinate the native surface with Sidenote's existing selection toolbar. */
+ export function registerNativeQuoteVisibility(ctx: Context, preferences: SidenotePreferences, ownsSelection: (sessionId: string) => boolean): void {
+-  type Entry = { options: { key?: string }; component: ComponentType<NativeQuoteProps> }
++  type Entry = { options: { key?: string; registrant?: string }; component: ComponentType<NativeQuoteProps> }
+   const slots = ctx.slots as Context['slots'] & {
+     entries(name: string): readonly Entry[]
+     subscribe(name: string, listener: () => void): () => void
+@@ -17,7 +17,7 @@
+     const patched = new Map<Entry, { original: Entry['component']; wrapped: Entry['component'] }>()
+     const patch = (): void => {
+       for (const entry of slots.entries('conversation.chat.text-interaction')) {
+-        if (entry.options.key !== 'quote' || patched.has(entry)) continue
++        if (entry.options.key !== 'quote' || entry.options.registrant === 'dsh-prompt-history' || patched.has(entry)) continue
+         const Original = entry.component
+         const Wrapped = (props: NativeQuoteProps) => {
+           const state = useSyncExternalStore(preferences.subscribe, preferences.getSnapshot)
+diff --git a/src/client/sidechat/header.tsx b/src/client/sidechat/header.tsx
+--- a/src/client/sidechat/header.tsx
++++ b/src/client/sidechat/header.tsx
+@@ -1,7 +1,7 @@
+ /**
+  * 顶栏「侧边」入口（Delivery_02 Workitem_02 发现性）：注册进宿主的
+- * `conversation.session.header.utilities` 槽位（会话头部右上角的工具条，
+- * 「Session log」所在处）——侧边聊天从此有一个永远可见的视觉入口，
++ * `conversation.session.header.actions` 槽位，紧跟「工作台」，在后台任务之前。
++ * 侧边聊天保留顶栏入口，
+  * 不再只有 /side 斜杠命令和「+」菜单。
+  *
+  * 行为 = 打开或聚焦侧边聊天（与 bridge 同一编排 openOrFocusSideChat）。
+@@ -39,7 +39,7 @@
+       aria-label={t('headerSideTitle')}
+       onClick={() => { openOrFocusSideChat(ctx, sessionId) }}
+     >
+-      <IconNewChatOutline16 size={13} />
++      <IconNewChatOutline16 size={14} />
+       <span>{t('headerSide')}</span>
+     </button>
+   )
+@@ -47,11 +47,11 @@
+ 
+ export function registerHeaderEntry(ctx: Context): void {
+   try {
+-    ctx.slots.inject('conversation.session.header.utilities', () => {
++    ctx.slots.inject('conversation.session.header.actions', () => {
+       return ctx.slots.register({
+-        name: 'conversation.session.header.utilities',
++        name: 'conversation.session.header.actions',
+         id: 'dsh-sidenote-header',
+-        order: 10,
++        order: 12,
+         registrant: 'dsh-sidenote',
+       }, () => <HeaderSideButton ctx={ctx} />)
+     })
+diff --git a/src/client/sidechat/sidechat.module.css b/src/client/sidechat/sidechat.module.css
+--- a/src/client/sidechat/sidechat.module.css
++++ b/src/client/sidechat/sidechat.module.css
+@@ -71,8 +71,10 @@
+ .emptyText { font-size: 13px; line-height: 1.6; color: var(--dsw-alias-label-secondary); max-width: 280px; }
+ .stateDetail, .errorRow { font-size: 13px; line-height: 1.6; color: var(--dsw-alias-state-error-primary); overflow-wrap: anywhere; }
+ .errorRow { padding: 8px 12px; }
+-.headerSide { display: inline-flex; align-items: center; gap: 4px; border: 0; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); padding: 4px 8px; cursor: pointer; font: inherit; font-size: 13px; line-height: 20px; }
+-.headerSide:hover, .headerSide:focus-visible { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
++/* 与同一标题操作区的「工作台」按钮对齐，不依赖其私有类名。 */
++.headerSide { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 3px 9px; border: 1px solid var(--dsw-alias-border-l2, #d5d8dc); border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary, #737983); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
++.headerSide:hover { background: var(--dsw-alias-interactive-bg-hover, rgb(128 128 128 / 10%)); }
++.headerSide:focus-visible { outline: 2px solid var(--dsw-focus-ring-color, #718bc2); outline-offset: 2px; }
+ .headerSide:disabled { opacity: .4; cursor: default; }
+ 
+ .contextUserRow { display: flex; align-items: flex-end; flex-direction: column; gap: 8px; margin: 16px 0 24px; }
+diff --git a/tests/e2e/header-style.e2e.ts b/tests/e2e/header-style.e2e.ts
+--- a/tests/e2e/header-style.e2e.ts
++++ b/tests/e2e/header-style.e2e.ts
+@@ -7,17 +7,26 @@
+ for (const fontSize of [14, 16]) {
+   test(`侧边按钮样式：父容器 ${fontSize}px 时保持紧凑`, async ({ page }) => {
+     await page.setContent(`
+-      <style>${stylesheet}</style>
+-      <div style="font-size: ${fontSize}px; line-height: 28px">
+-        <button class="headerSide"><span>侧边</span></button>
++      <style>${stylesheet}
++        .workbench { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 3px 9px; border: 1px solid #d5d8dc; border-radius: 6px; font: inherit; font-size: 12px; }
++      </style>
++      <div style="font-size: ${fontSize}px; line-height: 20px">
++        <button class="workbench"><svg width="14" height="14"></svg><span>工作台</span></button>
++        <button class="headerSide"><svg width="14" height="14"></svg><span>侧边</span></button>
+       </div>
+     `)
+ 
+     const button = page.getByRole('button', { name: '侧边' })
+     await expect(button.locator('..')).toHaveCSS('font-size', `${fontSize}px`)
+-    await expect(button).toHaveCSS('font-size', '13px')
++    await expect(button).toHaveCSS('font-size', '12px')
+     await expect(button).toHaveCSS('line-height', '20px')
+-    await expect(button.locator('span')).toHaveCSS('font-size', '13px')
++    await expect(button.locator('span')).toHaveCSS('font-size', '12px')
+     await expect(button).toHaveCSS('height', '28px')
++    await expect(button).toHaveCSS('border-top-width', '1px')
++    await expect(button).toHaveCSS('border-radius', '6px')
++    const workbench = page.getByRole('button', { name: '工作台' })
++    expect((await button.boundingBox())?.height).toBe((await workbench.boundingBox())?.height)
++    await button.focus()
++    await expect(button).toHaveCSS('outline-width', '2px')
+   })
+ }
+diff --git a/tests/header-entry.spec.ts b/tests/header-entry.spec.ts
+new file mode 100644
+--- /dev/null
++++ b/tests/header-entry.spec.ts
+@@ -0,0 +1,16 @@
++import { describe, expect, it, vi } from 'vitest'
++import type { Context } from '../src/client/host/contracts.ts'
++import { registerHeaderEntry } from '../src/client/sidechat/header.tsx'
++
++describe('顶栏侧边入口', () => {
++  it('在标题操作区注册一次，紧跟工作台（11），在后台任务（20）之前', () => {
++    const register = vi.fn(() => () => {})
++    const inject = vi.fn((_name: string, setup: () => () => void) => setup())
++    registerHeaderEntry({ slots: { inject, register } } as unknown as Context)
++    expect(inject).toHaveBeenCalledWith('conversation.session.header.actions', expect.any(Function))
++    expect(register).toHaveBeenCalledTimes(1)
++    expect(register).toHaveBeenCalledWith({
++      name: 'conversation.session.header.actions', id: 'dsh-sidenote-header', order: 12, registrant: 'dsh-sidenote',
++    }, expect.any(Function))
++  })
++})
+diff --git a/tests/native-quote-preferences.spec.tsx b/tests/native-quote-preferences.spec.tsx
+--- a/tests/native-quote-preferences.spec.tsx
++++ b/tests/native-quote-preferences.spec.tsx
+@@ -91,14 +91,17 @@
+     const { preferences } = preferenceFixture()
+     const original = () => <button>Native quote</button>
+     const entry = { options: { key: 'quote' }, component: original }
++    const ownMenu = () => <button>Prompt History</button>
++    const externalEntry = { options: { key: 'quote', registrant: 'dsh-prompt-history' }, component: ownMenu }
+     const disposers: (() => void)[] = []
+     const ctx = { slots: {
+       inject: (_name: string, callback: () => () => void) => { const dispose = callback(); disposers.push(dispose); return dispose },
+-      entries: () => [entry],
++      entries: () => [entry, externalEntry],
+       subscribe: () => () => {},
+     } } as unknown as Context
+     const owned = new Set(['main', 'side-a', 'side-b'])
+     registerNativeQuoteVisibility(ctx, preferences, sessionId => owned.has(sessionId))
++    expect(externalEntry.component).toBe(ownMenu)
+     const wrapped = entry.component
+     const host = document.createElement('div')
+     document.body.append(host)
+diff --git a/tests/send-interceptor.spec.ts b/tests/send-interceptor.spec.ts
+--- a/tests/send-interceptor.spec.ts
++++ b/tests/send-interceptor.spec.ts
+@@ -119,6 +119,35 @@
+   afterEach(() => {
+     harness = undefined
+     vi.unstubAllGlobals()
++  })
++
++  it('正文为空也提交主会话引用，只在宿主确认后清理', async () => {
++    const accept = vi.fn()
++    vi.stubGlobal('__dshPromptHistoryQuotes', { has: (id: string) => id === SESSION, capture: () => ({ text: '> 选中的引用', accept }) })
++    harness = makeHarness({ withAnnotation: false, deferAdmission: true })
++    harness.send('queue')
++    harness.send('queue')
++    await flushMicrotasks()
++    expect(harness.texts).toEqual(['> 选中的引用'])
++    expect(accept).not.toHaveBeenCalled()
++    harness.acknowledge()
++    await flushMicrotasks()
++    expect(accept).toHaveBeenCalledOnce()
++  })
++
++  it('主会话引用发送被拒绝时不清理，移除临时拼入内容后可重试', async () => {
++    const accept = vi.fn()
++    vi.stubGlobal('__dshPromptHistoryQuotes', { has: () => true, capture: () => ({ text: '> 选中的引用', accept }) })
++    harness = makeHarness({ withAnnotation: false, rejectFirstSend: true })
++    harness.send()
++    await flushMicrotasks()
++    expect(harness.draft()).toBe('')
++    expect(harness.error()).toMatch(/host rejected/)
++    expect(accept).not.toHaveBeenCalled()
++    harness.send()
++    await flushMicrotasks()
++    expect(harness.texts).toEqual(['> 选中的引用', '> 选中的引用'])
++    expect(accept).toHaveBeenCalledOnce()
+   })
+ 
+   it.each(['edit', 'failure', 'success'] as const)('preserves first-send context during asynchronous preparation: %s', async outcome => {

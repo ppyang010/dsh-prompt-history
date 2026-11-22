@@ -19,7 +19,7 @@ import { addQuoteEntry, selectionAnchor } from './quoteMarks.tsx'
 import {
   editorHost, editorSelectedText, editorSelectionOffsets, focusEditor, isEditorTarget, setEditorCaret,
 } from './editor.ts'
-import { getPrefs } from './prefs.ts'
+import { getPrefs, subscribePrefs } from './prefs.ts'
 import { quoteBlock, sendToSideChat } from './bridge.ts'
 import type { LiveComposer } from './useSuggestion.ts'
 
@@ -219,6 +219,12 @@ export function useClipboard(input: ClipboardInput): void {
     }
 
     const onSelectionChange = (): void => {
+      // 原生菜单拥有选区交互；连自动复制也暂停，保留兼容模式偏好。
+      if (getPrefs().nativeSelection) {
+        window.clearTimeout(timer)
+        hideSelectionToolbar()
+        return
+      }
       const live = liveRef.current
       if (live.phase === 'adjudicating' || live.phase === 'submitting' || live.removed) {
         hideSelectionToolbar()
@@ -238,13 +244,14 @@ export function useClipboard(input: ClipboardInput): void {
       }
       window.clearTimeout(timer)
       timer = window.setTimeout(() => {
+        if (getPrefs().nativeSelection) return
         if (mode === 'auto') {
           copySelection()
         } else {
           // Another quote plugin shows its own bar for the same selection
           // (`dshq-actions`); two toolbars stacked on one selection is worse than
           // either, so ours stands down when that pref is on.
-          if (getPrefs().quoteYield && document.querySelector('.dshq-actions') !== null) {
+          if (getPrefs().quoteYield && document.querySelector('.dshq-actions, [data-text-interaction-surface][aria-hidden="false"]') !== null) {
             hideSelectionToolbar()
             return
           }
@@ -283,6 +290,12 @@ export function useClipboard(input: ClipboardInput): void {
       hideSelectionToolbar()
     }
 
+    // 切换模式立即撤回旧浮层和延迟任务，不等待下一次 selectionchange。
+    const unsubscribePrefs = subscribePrefs(() => {
+      window.clearTimeout(timer)
+      hideSelectionToolbar()
+      lastKey = ''
+    })
     document.addEventListener('selectionchange', onSelectionChange)
     document.addEventListener('mousedown', onMouseDown, true)
     document.addEventListener('keydown', onKeyDown, true)
@@ -291,6 +304,7 @@ export function useClipboard(input: ClipboardInput): void {
     window.addEventListener('resize', hideSelectionToolbar)
     console.info('[dsh-prompt-history] copy modes active (toolbar/auto)')
     return () => {
+      unsubscribePrefs()
       document.removeEventListener('selectionchange', onSelectionChange)
       document.removeEventListener('mousedown', onMouseDown, true)
       document.removeEventListener('keydown', onKeyDown, true)

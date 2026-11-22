@@ -23,8 +23,9 @@ import { hideSuggestion, installSuggestStyle, showPending, showSuggestion } from
 import { hideGhost, showGhost } from './ghost.ts'
 import { bindSideChat } from './sideChat.tsx'
 import { bindRootContext } from './sessionCtx.ts'
-import { bindQuoteNotes } from './quoteMarks.tsx'
+import { bindQuoteNotes, installQuoteSubmissionBridge } from './quoteMarks.tsx'
 import { ensureSeeded } from './templateLibrary.ts'
+import { bindNativeSelectionMenu } from './NativeSelectionMenu.tsx'
 
 /** Required services: the slot registry, the locale service. */
 export const inject = ['slots', 'locale']
@@ -32,9 +33,17 @@ export const inject = ['slots', 'locale']
 /** One-time style tag for the settings section (theme tokens adapt to light/dark). */
 const SETTINGS_CSS = [
   '.dsh-ph-settings{padding:4px 2px;}',
+  'body:has([data-ph-sidenote-menu]) .dsh-ph-native-menu:not([data-ph-sidenote-menu] .dsh-ph-native-menu){display:none!important;}',
+  '[data-ph-sidenote-menu] .dsh-ph-native-menu{border:none;box-shadow:none;padding:0;background:transparent;}',
+  '.dsh-ph-native-menu{display:flex;align-items:center;flex-wrap:wrap;gap:2px;padding:4px;max-width:calc(100vw - 24px);border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-base,#fff));color:var(--dsw-alias-label-primary);box-shadow:var(--dsw-elevation-panel,0 4px 16px #0003);isolation:isolate;}',
+  '.dsh-ph-native-menu button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:32px;border:0;border-radius:8px;padding:5px 10px;background:transparent;color:inherit;font:var(--dsw-font-xs-13,13px sans-serif);white-space:nowrap;cursor:pointer;box-shadow:none;}',
+  '.dsh-ph-native-menu button:hover,.dsh-ph-native-menu button:focus-visible{background:var(--dsw-alias-interactive-bg-hover);}',
+  '.dsh-ph-native-menu button:disabled{opacity:.5;cursor:default;}',
+  '.dsh-ph-native-menu [role=status]{max-width:260px;padding:4px 8px;font-size:12px;}',
   '.dsh-ph-title{margin:0 0 10px;font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary);}',
   '.dsh-ph-row{display:flex;align-items:flex-start;gap:8px;margin:8px 0;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary);cursor:pointer;}',
   '.dsh-ph-row input{margin-top:3px;accent-color:var(--dsw-static-blue-900);}',
+  '.dsh-ph-row input[type=number]{width:4.5em;margin-top:0;flex:0 0 auto;}',
   '.dsh-ph-note{margin:10px 0 0;font-size:12px;color:var(--dsw-alias-label-tertiary);}',
   '.dsh-ph-group{margin:8px 0 4px;font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);}',
   // Header-fixed / list-scrollable: the list is a flex child with min-height:0
@@ -113,6 +122,8 @@ export function apply(ctx: ClientContext): void {
   // user-text rule and node renderer on uiConversation + slots, and both live
   // outside React's tree.
   bindQuoteNotes(ctx)
+  ctx.effect(installQuoteSubmissionBridge, 'dsh-prompt-history: quote submission bridge')
+  bindNativeSelectionMenu(ctx)
   // Style first: the suggestion overlay hides the composer's own placeholder.
   installSuggestStyle()
 
@@ -149,8 +160,9 @@ export function apply(ctx: ClientContext): void {
   // The suggestion bridge needs the `remote` service (mounted from an injected
   // child context) and then its `remote.promptSuggest` namespace service, which
   // only exists after the mount — the second inject waits for exactly that.
-  ctx.slots.inject('conversation.input.right', () => ctx.slots.register(
-    { name: 'conversation.input.right', id: 'dsh-prompt-history' },
+  // 左侧插槽位于权限/计划选择之后，增强与模板按钮在此显示。
+  ctx.slots.inject('conversation.input.left', () => ctx.slots.register(
+    { name: 'conversation.input.left', id: 'dsh-prompt-history' },
     InputHistory,
   ))
   ctx.slots.inject('settings.section', () => ctx.slots.register(

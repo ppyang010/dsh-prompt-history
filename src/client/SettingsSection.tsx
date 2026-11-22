@@ -4,9 +4,10 @@
  * navigation helpers, plus a bridge status line so a broken host link is
  * visible without opening the console.
  */
-import { useSyncExternalStore } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { getPrefs, setPref, subscribePrefs, type CopyMode } from './prefs.ts'
+import { SESSION_CAP_MAX, SESSION_CAP_MIN } from './historyRing.ts'
 import type { PromptHistoryKey } from './locales.ts'
 import { PLUGIN_VERSION } from './i18n.ts'
 import { getActiveBridge, subscribeBridge } from './suggest.ts'
@@ -22,6 +23,12 @@ const COPY_MODES: ReadonlyArray<{ value: CopyMode; label: PromptHistoryKey }> = 
 export function SettingsSection({ t }: PropsLocale<'dsh-prompt-history'>): JSX.Element {
   const prefs = useSyncExternalStore(subscribePrefs, getPrefs)
   const bridgeReady = useSyncExternalStore(subscribeBridge, () => getActiveBridge() !== null)
+  const [capDraft, setCapDraft] = useState(String(prefs.sessionHistoryCap))
+  useEffect(() => { setCapDraft(String(prefs.sessionHistoryCap)) }, [prefs.sessionHistoryCap])
+  const commitCap = (): void => {
+    setPref('sessionHistoryCap', Number(capDraft))
+    setCapDraft(String(getPrefs().sessionHistoryCap))
+  }
   return (
     <div className="dsh-ph-settings">
       <h4 className="dsh-ph-title">{t('settings.title')}（dsh-prompt-history v{PLUGIN_VERSION}）</h4>
@@ -85,6 +92,20 @@ export function SettingsSection({ t }: PropsLocale<'dsh-prompt-history'>): JSX.E
       </label>
 
       <p className="dsh-ph-group">{t('settings.groupClipboard')}</p>
+      <label className="dsh-ph-row">
+        <input
+          type="checkbox"
+          checked={prefs.nativeSelection}
+          onChange={(e) => { setPref('nativeSelection', e.target.checked) }}
+        />
+        <span>{t('selection.native')}</span>
+      </label>
+      <p className="dsh-ph-note">{t('selection.note')}</p>
+      <label className="dsh-ph-row">
+        <input type="checkbox" checked={prefs.sideChatDomCompat}
+          onChange={(e) => { setPref('sideChatDomCompat', e.target.checked) }} />
+        <span>{t('selection.sideChatCompat')}</span>
+      </label>
       {COPY_MODES.map((mode) => (
         <label className="dsh-ph-row" key={mode.value}>
           <input
@@ -113,6 +134,19 @@ export function SettingsSection({ t }: PropsLocale<'dsh-prompt-history'>): JSX.E
           onChange={(e) => { setPref('globalHistory', e.target.checked) }}
         />
         <span>{t('history.global')}</span>
+      </label>
+      <label className="dsh-ph-row">
+        <span>{t('history.sessionCap')}</span>
+        <input
+          type="number"
+          min={SESSION_CAP_MIN}
+          max={SESSION_CAP_MAX}
+          step={1}
+          value={capDraft}
+          onChange={(e) => { setCapDraft(e.target.value) }}
+          onBlur={commitCap}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.currentTarget.blur() } }}
+        />
       </label>
 
       <p className="dsh-ph-group">{t('sideChat.group')}</p>

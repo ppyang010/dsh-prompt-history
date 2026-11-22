@@ -22,12 +22,11 @@
  * composer's own handler (execCommand), with a navigator.clipboard fallback.
  *
  * History is fed from the conversation snapshot's user nodes (kind 'user' and
- * 'steering'), appended as they land — so everything submitted while the page
- * is open is recallable even after the session event window slides. Consecutive
- * duplicates collapse; on a session switch the window's in-window user messages
- * seed the list. Unlike a parallel storage ring, the history IS the session's
- * own message log: it stays consistent with the transcript, survives reloads
- * through the session itself, and needs no configuration or extra storage.
+ * 'steering'), appended as they land, and also written to a per-session
+ * localStorage list (default 50, configurable) so ↑/↓ still works after a
+ * reload when the chat window only shows the latest turns. Consecutive
+ * duplicates collapse. This does not call loadOlder and does not store model
+ * replies. Cross-session history remains a separate global ring.
  *
  * Interception guards: composer textarea target only, no modifier keys
  * (Shift+Up still extends selection), no IME composition, machine not
@@ -59,7 +58,7 @@ import { registerMainInserter } from './bridge.ts'
 import { useSuggestion } from './useSuggestion.ts'
 
 /** Full props of the input-history entry: framework standard kit + owner share. */
-export type InputHistoryProps = PropsRuntime<'conversation.input.right'>
+export type InputHistoryProps = PropsRuntime<'conversation.input.left'>
 
 /** The suggestion menu (slash/at) renders a listbox inside the card while open. */
 const OPEN_MENU = '[role="listbox"]'
@@ -140,7 +139,7 @@ export function InputHistory(props: InputHistoryProps) {
   // Browsing (↑/↓ with prefix search) and Ctrl+R reverse search.
   const browsing = useBrowse({ liveRef, historyRef, browseRef, searchRef })
   // History: seed/reset/fold the prompt list from the session's own messages.
-  useHistory({ sessionId, messages, historyRef, seenRef, browseRef, searchRef })
+  useHistory({ sessionId: sessionId?.toString(), messages, historyRef, seenRef, browseRef, searchRef })
   liveRef.current = { draft, phase, removed, inputActions }
 
   // ---- prompt completion (Codex/fish-style type-ahead) ----

@@ -95,6 +95,7 @@ function storeFor(sessionId: string | undefined): QuoteStore {
 
 /** Publish a change to every mounted overlay of the session. */
 function emit(store: QuoteStore): void {
+  if (typeof window !== 'undefined') window.dispatchEvent(new window.Event('dsh-ph-pending-quotes'))
   for (const listener of [...store.listeners]) {
     try {
       listener()
@@ -218,6 +219,32 @@ function pendingPayload(sessionId: string | undefined): string | null {
   if (entries.length === 0) return null
   const payload = quotePayload(entries)
   return payload === '' ? null : payload
+}
+
+/** 发送时冻结本批引用；确认后仅清理由这批发送且未被编辑的条目。 */
+export function capturePendingQuotes(sessionId: string): { text: string; accept(): void } | null {
+  if (sessionId === '') return null
+  const entries = quoteEntries(sessionId)
+  if (entries.length === 0) return null
+  const text = quotePayload(entries).trimEnd()
+  if (text === '') return null
+  const sent = new Map(entries.map(entry => [entry.id, entry]))
+  return { text, accept() {
+    setEntries(sessionId, quoteEntries(sessionId).filter(entry => {
+      const before = sent.get(entry.id)
+      return before === undefined || before.text !== entry.text || before.comment !== entry.comment
+        || before.fence !== entry.fence || before.perItem !== entry.perItem
+    }))
+  } }
+}
+
+export function installQuoteSubmissionBridge(): () => void {
+  const target = window as Window & { __dshPromptHistoryQuotes?: typeof bridge }
+  const notify = () => window.dispatchEvent(new window.Event('dsh-ph-pending-quotes'))
+  const bridge = { has: (sessionId: string) => sessionId !== '' && quoteEntries(sessionId).length > 0, capture: capturePendingQuotes }
+  target.__dshPromptHistoryQuotes = bridge
+  notify()
+  return () => { if (target.__dshPromptHistoryQuotes === bridge) { delete target.__dshPromptHistoryQuotes; notify() } }
 }
 
 /** The buttons a composer sends with (send, or stop while a turn is running). */
@@ -588,6 +615,7 @@ export function QuoteOverlay({ sessionId, draft, phase, inputActions }: QuoteOve
       const target = event.target instanceof Element ? event.target : null
       const card = target === null ? null : target.closest(COMPOSER_CARD)
       return slot !== null && card !== null && slot.closest(COMPOSER_CARD) === card
+         && card.closest('[data-dsh-sidenote-handles-ph-quotes]') === null
     }
     const onKeyDown = (event: KeyboardEvent): void => {
       if (!isSubmitEnter(event) || !owns(event)) return

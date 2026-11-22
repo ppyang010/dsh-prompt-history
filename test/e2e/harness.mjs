@@ -69,11 +69,15 @@ const SEAM_KEY = 'dsh-prompt-history.testSeam'
  * path; the product default is off (STORE_VERSION 4).
  */
 export const BASE_PREFS = {
-  version: 4,
+  version: 5,
   data: {
+    // 旧工具栏套件显式选择兼容模式；新默认由本地组件测试覆盖。
+    nativeSelection: false,
+    quoteYield: false,
     copyMode: 'toolbar',
     rightClickPaste: true,
     globalHistory: false,
+    sessionHistoryCap: 50,
     promptCompletion: true,
     aiCompletion: false,
     contextSuggest: false,
